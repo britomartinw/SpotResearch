@@ -9,12 +9,50 @@ from bosdyn.client.robot_command import RobotCommandBuilder, RobotCommandClient
 from bosdyn.client.robot_command import blocking_stand, blocking_sit, blocking_selfright
 
 from bosdyn.client import ResponseError, RpcError
-from bosdyn.client.lease import Error as LeaseBaseError
+from bosdyn.client.lease import LeaseClient, Error as LeaseBaseError
+
+from bosdyn.client.estop import EstopClient, EstopEndpoint, EstopKeepAlive
 
 BASE_SPEED = 0.5  # m/s
 BASE_ROTATION = 0.8  # rad/sec
 CMD_DURATION = 0.6  # seconds
 INPUT_RATE = 0.1
+
+# Estop code taken from the python examples in the spot-sdk
+class EstopNoGui():
+    """Provides a software estop without a GUI.
+
+    To use this estop, create an instance of the EstopNoGui class and use the stop() and allow()
+    functions programmatically.
+    """
+
+    def __init__(self, client, timeout_sec, name=None):
+
+        # Force server to set up a single endpoint system
+        ep = EstopEndpoint(client, name, timeout_sec)
+        ep.force_simple_setup()
+
+        # Begin periodic check-in between keep-alive and robot
+        self.estop_keep_alive = EstopKeepAlive(ep)
+
+        # Release the estop
+        self.estop_keep_alive.allow()
+
+    def __enter__(self):
+        pass
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Cleanly shut down estop on exit."""
+        self.estop_keep_alive.end_periodic_check_in()
+
+    def stop(self):
+        self.estop_keep_alive.stop()
+
+    def allow(self):
+        self.estop_keep_alive.allow()
+
+    def settle_then_cut(self):
+        self.estop_keep_alive.settle_then_cut()
 
 class User_interface():
     
@@ -33,8 +71,8 @@ class User_interface():
             
         }
     
-    def display_error(desc, err, stdscr):
-        stdscr.addstr(6, 0, f'Failed {desc}: {err}')  
+    def display_error(self, desc, err, stdscr):
+        stdscr.addstr(8, 0, f'Failed {desc}: {err}', curses.color_pair(2))  
     
     def try_cmd(self, desc, cmd, stdscr):
         try:
@@ -44,7 +82,10 @@ class User_interface():
         
     def circle(self, stdscr):
         cmd = RobotCommandBuilder.synchro_velocity_command(v_x=BASE_SPEED, v_y=0.0, v_rot=-math.radians(90))
-        self.try_cmd(desc='Circle', cmd=cmd, stdscr=stdscr)
+        try:
+            self.command_client.robot_command(command=cmd, end_time_secs=time.time() + 4.4)
+        except(ResponseError,RpcError,LeaseBaseError)as err:
+            self.display_error(desc='Circle', err=err,stdscr=stdscr)
         
     def foward(self, stdscr):
         cmd = RobotCommandBuilder.synchro_velocity_command(v_x=BASE_SPEED, v_y=0.0, v_rot=0.0)
@@ -63,14 +104,14 @@ class User_interface():
         self.try_cmd(desc='Move Left', cmd=cmd, stdscr=stdscr)
         
     def clockwise(self, stdscr):
-        cmd = RobotCommandBuilder.synchro_velocity_command(v_x=0.0, v_y=0.0, v_rot=BASE_ROTATION)
+        cmd = RobotCommandBuilder.synchro_velocity_command(v_x=0.0, v_y=0.0, v_rot=-BASE_ROTATION)
         self.try_cmd(desc='Rotate Clockwise', cmd=cmd, stdscr=stdscr)
         
     def counterclockwise(self, stdscr):
-        cmd = RobotCommandBuilder.synchro_velocity_command(v_x=0.0, v_y=0.0, v_rot=-BASE_ROTATION)
+        cmd = RobotCommandBuilder.synchro_velocity_command(v_x=0.0, v_y=0.0, v_rot=BASE_ROTATION)
         self.try_cmd(desc='Rotate Counterclockwise', cmd=cmd, stdscr=stdscr)   
         
-    def exit(stdscr):
+    def exit(self, stdscr):
         curses.nocbreak()
         curses.echo()
         stdscr.keypad(False)
@@ -80,74 +121,89 @@ class User_interface():
         curses.noecho()
         curses.cbreak()
         stdscr.keypad(True) # Enable special keys
+        curses.start_color()
         run = True
+        curses.init_pair(1, curses.COLOR_GREEN, curses.COLOR_BLACK)
+        curses.init_pair(2, curses.COLOR_YELLOW, curses.COLOR_BLACK)
+        curses.init_pair(3, curses.COLOR_RED, curses.COLOR_BLACK)
+        green = curses.color_pair(1)
+        yellow = curses.color_pair(2)
+        red = curses.color_pair(3)
+        
+        stdscr.addstr(0, 0, "User Interface:", yellow)
+        stdscr.addstr(1, 0, "[ESC]: Exit, [K]: Power-On, [L]: Power-Off", yellow)
+        stdscr.addstr(2, 0, "[T]: Stand, [Y]: Sit", yellow)   
+        stdscr.addstr(3, 0, "[SPACE]: Trigger estop, [R]: Release estop, [V]: Settle then cut estop", yellow)   
+        stdscr.addstr(4, 0, "[W, A, S, D]: Move", yellow)
+        stdscr.addstr(5, 0, "[Q, E]: Rotate", yellow)
+        stdscr.addstr(6, 0, "[C]: Circle", yellow)
         try:
-            stdscr.addstr(0, 0, "User Interface:")
-            stdscr.addstr(1, 0, "[esc]: Exit, [k]: Power-On, [l]: Power-Off")
-            stdscr.addstr(2, 0, "[esc]: Exit, [k]: Power-On, [l]: Power-Off")   
-            stdscr.addstr(3, 0, "[w, a, s, d]: Move")
-            stdscr.addstr(4, 0, "[q, e]: Rotate\n")
-            stdscr.addstr(5, 0, "[c]: Circle\n")
+ 
             stdscr.refresh()
             while run:
                 key = stdscr.getch()
                 if key == ord("\x1b"):
+                    run = False
                     break
                 
                 if key == ord("k"):
-                    self.robot.power_on(timeout_sec=20)
-                    
+                    self.robot.power_on(timeout_sec=20) 
                 elif key == ord("l"):
                     self.robot.power_off(cut_immediately=False)                
                 
-                if key == ord('y'):
+                if key == ord('t'):
                     blocking_stand(self.command_client, timeout_sec=10)    
-                elif key == ord('['):
+                elif key == ord('y'):
                     blocking_sit(self.command_client, timeout_sec=10)
                     
+                if key == ord(' '):
+                    self.estop_nogui.stop()
+                if key == ord('r'):
+                    self.estop_nogui.allow()
+                if key == ord('v'):
+                    self.estop_nogui.settle_then_cut()
                     
                 if key == ord('w'):
-                    cmd = RobotCommandBuilder.synchro_velocity_command(v_x=0.5, v_y=0.0, v_rot=0.0)
-                    try:
-                        self.command_client.robot_command(command=cmd, end_time_secs=time.time() + 0.6)
-                    except(ResponseError,RpcError,LeaseBaseError)as err:
-                        self.display_error(desc="Moving Forward", err=err, stdscr=stdscr)
-                if key == ord('s'):
-                    cmd = RobotCommandBuilder.synchro_velocity_command(v_x=-0.5, v_y=0.0, v_rot=0.0)
-                    try:
-                        self.command_client.robot_command(command=cmd, end_time_secs=time.time() + 0.6)
-                    except(ResponseError,RpcError,LeaseBaseError)as err:
-                        self.display_error(desc="Moving Backward", err=err, stdscr=stdscr)
+                    self.foward(stdscr=stdscr)
+                elif key == ord('s'):
+                    self.backwards(stdscr=stdscr)
+                    
                 if key == ord('d'):
-                    cmd = RobotCommandBuilder.synchro_velocity_command(v_x=0.0, v_y=-0.5, v_rot=0.0)
-                    try:
-                        self.command_client.robot_command(command=cmd, end_time_secs=time.time() + 0.6)
-                    except(ResponseError,RpcError,LeaseBaseError)as err:
-                        self.display_error(desc='Moving_Right', err=err, stdscr=stdscr)
-                        
-                if key == ord('a'):
-                    cmd = RobotCommandBuilder.synchro_velocity_command(v_x=0.0, v_y=0.5, v_rot=0.0)
-                    try:
-                        self.command_client.robot_command(command=cmd, end_time_secs=time.time() + 0.6)
-                    except(ResponseError,RpcError,LeaseBaseError)as err:
-                        self.display_error(desc="Moving Left", err=err, stdscr=stdscr)
+                    self.right(stdscr=stdscr)                        
+                elif key == ord('a'):
+                    self.left(stdscr=stdscr)
+                    
                 if key == ord('q'):
-                    cmd = RobotCommandBuilder.synchro_velocity_command(v_x=0.0, v_y=0.0, v_rot=0.8)
-                    try:
-                        self.command_client.robot_command(command=cmd, end_time_secs=time.time() + 0.6)
-                    except(ResponseError,RpcError,LeaseBaseError)as err:
-                        self.display_error(desc="Rotating Right", err=err, stdscr=stdscr)
-                if key == ord('e'):
-                    cmd = RobotCommandBuilder.synchro_velocity_command(v_x=0.0, v_y=0.0, v_rot=-0.8)
-                    try:
-                        self.command_client.robot_command(command=cmd, end_time_secs=time.time() + 0.6)
-                    except(ResponseError,RpcError,LeaseBaseError)as err:
-                        self.display_error(desc="Roatating Left", err=err, stdscr=stdscr)
+                    self.counterclockwise(stdscr=stdscr)
+                elif key == ord('e'):
+                    self.clockwise(stdscr=stdscr)
+                
                 if key == ord('c'):
-                    self.circle(stdscr)           
+                    self.circle(stdscr)    
+                    
+                estop_status = 'NOT_STOPPED\n'
+                estop_status_color = green
+                estop_states = self.state_client.get_robot_state().estop_states
+                for estop_state in estop_states:
+                    state_str = estop_state.State.Name(estop_state.state)
+                    if state_str == 'STATE_ESTOPPED':
+                        estop_status = 'STOPPED\n'
+                        estop_status_color = red
+                        break
+                    elif state_str == 'STATE_UNKNOWN':
+                        estop_status = 'ERROR\n'
+                        estop_status_color = red
+                    elif state_str == 'STATE_NOT_ESTOPPED':
+                        pass
+                    else:
+                        # Unknown estop status
+                        run = False
+                        break
+                        
+                stdscr.addstr(7, 0, estop_status, estop_status_color)
                     
                 stdscr.refresh()
-                time.sleep(0.1)
+                time.sleep(INPUT_RATE)
                             
         finally:
             curses.nocbreak()
@@ -173,18 +229,25 @@ class User_interface():
 
         # Retreaving robot state
         self.state_client = self.robot.ensure_client('robot-state')
-        print(self.state_client.get_robot_state().battery_states)
+        # print(self.state_client.get_robot_state().battery_states.battery.charge_percentage)
+        print("Charge Percentage:")
+        print([battery.charge_percentage.value for battery in self.state_client.get_robot_state().battery_states])
+
+        # print(self.state_client.get_robot_state().estop_states)
 
         # E-Stop State
-        estop_client = self.robot.ensure_client('estop')
+        estop_client = self.robot.ensure_client(EstopClient.default_service_name)
+        
+        self.estop_nogui = EstopNoGui(estop_client, 5, 'Estop NoGUI')
         
         assert not self.robot.is_estopped(), 'Robot is estopped. Please use an external E-Stop client, ' \
                                         'such as the estop SDK example, to configure E-Stop.'
 
         
-        self.lease_client = self.robot.ensure_client(bosdyn.client.lease.LeaseClient.default_service_name)
+        self.lease_client = self.robot.ensure_client(LeaseClient.default_service_name)
         with bosdyn.client.lease.LeaseKeepAlive(self.lease_client, must_acquire=True, return_at_exit=True):
 
+            print(self.state_client.get_robot_state().estop_states)
 
             self.command_client = self.robot.ensure_client(RobotCommandClient.default_service_name)
             
